@@ -2,13 +2,20 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::mem::MaybeUninit;
-use socket2::{Socket, Domain, Type, SockRef, MsgHdrMut, MaybeUninitSlice, RecvFlags};
+use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
 
 use crate::packet::Packet; 
-
+use crate::packet::NetworkPacket; 
 
 pub struct NetworkClient {
     socket: UdpSocket,
+}
+
+
+pub struct NetworkInfo {
+    pub current_id  : u64,
+    pub next_id     : u64,
+    pub missing_ids : Vec<u64>, 
 }
 
 impl NetworkClient {
@@ -33,7 +40,6 @@ impl NetworkClient {
             let flags: libc::c_uint = 
                 libc::SOF_TIMESTAMPING_RX_SOFTWARE | // Kernel network stack ingress
                 libc::SOF_TIMESTAMPING_RX_HARDWARE | // Physical NIC hardware ingress
-                libc::SOF_TIMESTAMPING_TX_SOFTWARE | // Kernel network stack egress
                 libc::SOF_TIMESTAMPING_SOFTWARE;     // Enable overall reporting framework
 
             if libc::setsockopt(
@@ -55,6 +61,8 @@ impl NetworkClient {
     
     pub fn start_listening (&self) -> io::Result<()> {
 
+        let mut network_info = NetworkInfo::new();
+
         let socket_ref = socket2::SockRef::from(&self.socket);
         
         let mut buf         = [MaybeUninit::<u8>::uninit(); 1024];
@@ -66,15 +74,13 @@ impl NetworkClient {
             let mut iov = [MaybeUninitSlice::new(&mut buf)]; // I/O vector - direct memory pointer 
             let mut msg = MsgHdrMut::new()
                 .with_buffers(&mut iov)
-                .with_control(&mut control_buf); // create memory structure to hold data + headers
+                .with_control(&mut control_buf); // create memory structure to metadata
             
-
-            let start = std::time::Instant::now();
 
             let amt = socket_ref.recvmsg(&mut msg, 0)?;
-            
-            let received_at = std::time::Instant::now();
 
+
+            let received_at = std::time::Instant::now();
             let received = unsafe {         // Grab all written bits
                 std::slice::from_raw_parts(
                     buf.as_ptr() as *const u8,
@@ -82,14 +88,17 @@ impl NetworkClient {
                 )
             };
 
-            let packet = Packet::to_packet(received)?; 
-                    
+            
+            let packet = Packet::to_packet(received, &control_buf)?; 
+            
+            network_info.update_info(&packet)?;
+
             let elapsed = received_at.elapsed();
             println!(
-                "Received {} bytes. id={}, processing took {:?}",
+                "Received {} bytes. id={}, processing took {:?} \n",
                 amt,
-                packet.id,
-                elapsed
+                packet.packet.id,
+                elapsed,
             );
 
         }
@@ -114,4 +123,33 @@ impl NetworkClient {
         
     }
     
+}
+
+
+impl NetworkInfo {
+
+    pub fn new() -> Self {
+        Self {
+            current_id: 0,
+            next_id: 0,
+            missing_ids: Vec::new(),
+        }
+    }
+
+    pub fn update_info(&mut self, p: &NetworkPacket) -> io::Result<()> {
+
+        if self.current_id >= p.packet.id  {
+            println!("Old Packet");
+        } else if self.next_id == p.packet.id   {
+            println!("Correct Packet");
+            self.current_id = p.packet.id;
+            self.next_id = self.current_id + 10;
+        } else {
+            println!("Jumped Ahead");
+            self.current_id = p.packet.id;
+            self.next_id = self.current_id + 10;
+        }
+
+        Ok(())
+    }
 }
