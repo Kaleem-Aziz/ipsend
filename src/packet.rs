@@ -1,5 +1,6 @@
 use std::io;
 use std::mem::MaybeUninit;
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct Packet {
@@ -10,6 +11,7 @@ pub struct Packet {
 pub struct NetworkMetadata {
     pub sec         : libc::time_t,
     pub nsec        : libc::c_long,
+    pub time        : Duration,
     pub is_hardware : bool,
 }
 
@@ -83,7 +85,9 @@ impl Packet {
                         
                         println!("Captured TS (HW={}): {}.{:09}s", is_hardware, sec, nsec);
                         
-                        return Some(NetworkMetadata { sec, nsec, is_hardware });
+                        let time = Duration::new(sec as u64, nsec as u32);
+
+                        return Some(NetworkMetadata { sec, nsec, time, is_hardware });
                     
                     }
                     cmsg = libc::CMSG_NXTHDR(&msg, cmsg); // Move to next Contorl Message

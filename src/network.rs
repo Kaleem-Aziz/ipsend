@@ -88,10 +88,10 @@ impl NetworkClient {
 
             let amt = socket_ref.recvmsg(&mut msg, 0)?;
 
-
             network_info.start_time();
 
-            let received = unsafe {         // Grab all written bits
+            let received = unsafe {         
+                // Grab all written bits
                 std::slice::from_raw_parts(
                     buf.as_ptr() as *const u8,
                     amt,
@@ -100,7 +100,6 @@ impl NetworkClient {
 
             
             let packet = Packet::to_packet(received, &control_buf)?; 
-            
             network_info.update_info(&packet)?;
 
         }
