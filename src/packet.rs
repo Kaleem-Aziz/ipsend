@@ -1,25 +1,28 @@
 use std::io;
 use std::mem::MaybeUninit;
 
+#[derive(Default)]
 pub struct Packet {
     pub id  : u64,
 }
 
+#[derive(Default)]
 pub struct NetworkMetadata {
-    pub sec: libc::time_t,
-    pub nsec: libc::c_long,
-    pub is_hardware: bool,
+    pub sec         : libc::time_t,
+    pub nsec        : libc::c_long,
+    pub is_hardware : bool,
 }
 
+#[derive(Default)]
 pub struct NetworkPacket {
-    pub packet: Packet,            
+    pub packet  : Packet,            
     pub metadata: NetworkMetadata, 
 }
 
 
 impl Packet {
-    pub fn create_packet(id: u64) -> Packet{
-        Packet { id }
+    pub fn create_packet(_id: u64) -> Packet {
+        Packet { id: _id }
     }
 
     pub fn to_bytes(&self) -> [u8; 16] {
@@ -29,13 +32,13 @@ impl Packet {
         bytes
     }
 
-    pub fn to_packet(data: &[u8], meta: &[MaybeUninit::<u8>]) -> io::Result<NetworkPacket> {
+    pub fn to_packet(_data: &[u8], _meta: &[MaybeUninit::<u8>]) -> io::Result<NetworkPacket> {
         let mut id_bytes = [0u8; 8]; // Allocate space for Bytes
-        id_bytes.copy_from_slice(&data[0..8]); // move bytes to id
+        id_bytes.copy_from_slice(&_data[0..8]); // move bytes to id
         let id = u64::from_le_bytes(id_bytes); // convert bytes to int
         let packet = Packet { id };
 
-        let metadata = Packet::process_metadata(meta).ok_or_else(|| {
+        let metadata = Packet::process_metadata(_meta).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "Required SO_TIMESTAMPING control message missing from buffer",
@@ -46,12 +49,12 @@ impl Packet {
     }
 
 
-    pub fn process_metadata(buf: &[MaybeUninit::<u8>]) -> Option<NetworkMetadata> {
+    pub fn process_metadata(_buf: &[MaybeUninit::<u8>]) -> Option<NetworkMetadata> {
         
-        if !buf.is_empty() {
+        if !_buf.is_empty() {
             
-            let raw_metadata_ptr = buf.as_ptr(); 
-            let metadata_len = buf.len();
+            let raw_metadata_ptr = _buf.as_ptr(); 
+            let metadata_len = _buf.len();
 
             unsafe {
                 // Setup temporary msghdr using the pointer
