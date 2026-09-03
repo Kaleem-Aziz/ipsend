@@ -21,6 +21,8 @@ pub struct NetworkInfo {
     pub avg_latency         : u64,
     pub max_latency         : u64,
     pub min_latency         : u64,
+    pub network_loss        : u64,
+    pub kernal_loss         : u64,
     pub process_time        : Instant,
     pub last_packet         : NetworkData,
     pub missing_ids         : Vec<u64>,
@@ -95,7 +97,13 @@ impl NetworkClient {
         // Creating Buffers for kernal to push data into 
         let mut header      = [MaybeUninit::<u8>::uninit(); HEADER_SIZE];
         let mut buf         = [MaybeUninit::<u8>::uninit(); PAYLOAD_SZIE];
-        let mut control_buf = [MaybeUninit::<u8>::uninit(); 1024];
+        
+
+        // Aligning to 8 Bytes so CMSG_ Pointer correctly works
+        #[repr(align(8))]
+        struct ControlBuf([MaybeUninit<u8>; 1024]);
+        let mut control_buf = ControlBuf([MaybeUninit::uninit(); 1024]);
+
 
         println!("Waiting for data...");
         
@@ -108,7 +116,7 @@ impl NetworkClient {
 
             let mut msg = MsgHdrMut::new()
                 .with_buffers(&mut iov)
-                .with_control(&mut control_buf); // create memory structure to metadata
+                .with_control(&mut control_buf.0); // create memory structure to metadata
             
             // Take one datagram at a time and push into our buffers
             let amt = socket_ref.recvmsg(&mut msg, 0)?;
@@ -128,7 +136,7 @@ impl NetworkClient {
             // Fat pointer to our  memory 
             let hdr     = unsafe { std::slice::from_raw_parts(header.as_ptr() as *const u8, HEADER_SIZE) };
             let payload = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, payload_len) };
-            let control = unsafe { std::slice::from_raw_parts(control_buf.as_ptr() as *const u8, control_len) };
+            let control = unsafe { std::slice::from_raw_parts(control_buf.0.as_ptr() as *const u8, control_len) };
     
             let packet = NetworkData::to_packet(hdr, payload, control)?;
             network_info.update_info(&packet)?;
