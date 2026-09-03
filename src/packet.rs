@@ -1,5 +1,4 @@
 use std::io;
-use std::mem::MaybeUninit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 
@@ -33,11 +32,13 @@ pub struct NetworkPacket {
     pub id          : u64,   // 8 bytes
     pub tx_sec      : u64,   // 8 bytes 
     pub tx_nsec     : u64,   // 8 bytes 
+    pub packet_size : u64,   // 8 bytes
+
 }
 
 impl NetworkPacket {
-    pub fn new(id: u64, tx_sec: u64, tx_nsec: u64) -> Self {
-        NetworkPacket { id, tx_sec, tx_nsec }
+    pub fn new(id: u64, tx_sec: u64, tx_nsec: u64, packet_size: u64) -> Self {
+        NetworkPacket { id, tx_sec, tx_nsec, packet_size }
     }
 }
 
@@ -58,11 +59,24 @@ pub struct NetworkData {
 
 impl NetworkData {
 
-    pub fn to_packet(_data: &[u8], _meta: &[MaybeUninit::<u8>]) -> io::Result<NetworkData> {
+    pub fn to_packet(_hdr: &[u8], _data: &[u8], _meta: &[u8]) -> io::Result<NetworkData> {
         let mut id_bytes = [0u8; 8]; // Allocate space for Bytes
-        id_bytes.copy_from_slice(&_data[0..8]); // move bytes to id
+        id_bytes.copy_from_slice(&_hdr[0..8]); // move bytes to id
         let id = u64::from_le_bytes(id_bytes); // convert bytes to int
-        let packet = NetworkPacket::new(id, 0, 0 );
+
+        let mut tx_sec_bytes = [0u8; 8]; // Allocate space for Bytes
+        tx_sec_bytes.copy_from_slice(&_hdr[8..16]); // move bytes to tx_sec
+        let tx_sec = u64::from_le_bytes(tx_sec_bytes); // convert bytes to int
+
+        let mut tx_nsec_bytes = [0u8; 8]; // Allocate space for Bytes
+        tx_nsec_bytes.copy_from_slice(&_hdr[16..24]); // move bytes to tx_nsec
+        let tx_nsec = u64::from_le_bytes(tx_nsec_bytes); // convert bytes to int
+
+
+        let packet_size = (_data.len()) as u64;
+        
+
+        let packet = NetworkPacket::new(id, tx_sec, tx_nsec, packet_size);
 
         let metadata = NetworkData::process_metadata(_meta).ok_or_else(|| {
             io::Error::new(
@@ -75,25 +89,21 @@ impl NetworkData {
     }
 
 
-    pub fn process_metadata(_buf: &[MaybeUninit::<u8>]) -> Option<NetworkMetadata> {
+    pub fn process_metadata(_buf: &[u8]) -> Option<NetworkMetadata> {
         
-        if !_buf.is_empty() {
-            
-            let raw_metadata_ptr = _buf.as_ptr(); 
-            let metadata_len = _buf.len();
-
+        if !_buf.is_empty() { 
             unsafe {
                 // Setup temporary msghdr using the pointer
                 let mut msg: libc::msghdr = std::mem::zeroed();
-                msg.msg_control = raw_metadata_ptr as *mut libc::c_void;
-                msg.msg_controllen = metadata_len;
+                msg.msg_control    = _buf.as_ptr() as *mut libc::c_void;   
+                msg.msg_controllen = _buf.len();
 
                 // Hand the address of the temporary msghdr structure to the POSIX macros
                 let mut cmsg = libc::CMSG_FIRSTHDR(&msg); // Point to first Contorl Message
                 
                 while !cmsg.is_null() {
-                    // Validate the control message is from SOL_SOCKET and is SO_TIMESTAMP
-                    if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SO_TIMESTAMPING {
+                    // Validate the control message is from SOL_SOCKET and is SCM_TIMESTAMPING
+                    if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_TIMESTAMPING {
                         let ts_ptr = libc::CMSG_DATA(cmsg) as *const libc::timespec;
                         // Grab and split timestamps
                         let timestamps = std::slice::from_raw_parts(ts_ptr, 3);
@@ -106,9 +116,7 @@ impl NetworkData {
                         } else {
                             (sw_ts.tv_sec, sw_ts.tv_nsec, false)
                         };
-                        
-                        println!("Captured TS (HW={}): {}.{:09}s", is_hardware, sec, nsec);
-                        
+                                                
                         let time = Duration::new(sec as u64, nsec as u32);
 
                         return Some(NetworkMetadata { sec, nsec, time, is_hardware });
@@ -117,9 +125,8 @@ impl NetworkData {
                     cmsg = libc::CMSG_NXTHDR(&msg, cmsg); // Move to next Contorl Message
                 }
             }
-    
         }
-        
         None
     }
+        
 }
