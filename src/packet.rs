@@ -1,10 +1,44 @@
 use std::io;
 use std::mem::MaybeUninit;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+
+pub struct Packet<'a> {
+    pub id          : u64,       // 8 bytes
+    pub tx_sec      : u64,   // 8 bytes 
+    pub tx_nsec     : u64,  // 8 bytes 
+    pub payload     : &'a mut [u8],  // x bytes
+}
+
+impl <'a> Packet<'a>  {
+    pub fn new(id: u64, payload: &'a mut [u8]) -> Self {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        Packet { id, tx_sec: now.as_secs(), tx_nsec: now.subsec_nanos() as u64,  payload  }
+    }
+
+    pub fn to_bytes(&mut self) -> &[u8] {
+        
+        self.payload[0..8].copy_from_slice(&self.id.to_le_bytes());
+        self.payload[8..16].copy_from_slice(&self.tx_sec.to_le_bytes());
+        self.payload[16..24].copy_from_slice(&self.tx_nsec.to_le_bytes());
+
+        self.payload
+    }    
+
+}
+
 
 #[derive(Default)]
-pub struct Packet {
-    pub id  : u64,
+pub struct NetworkPacket {
+    pub id          : u64,   // 8 bytes
+    pub tx_sec      : u64,   // 8 bytes 
+    pub tx_nsec     : u64,   // 8 bytes 
+}
+
+impl NetworkPacket {
+    pub fn new(id: u64, tx_sec: u64, tx_nsec: u64) -> Self {
+        NetworkPacket { id, tx_sec, tx_nsec }
+    }
 }
 
 #[derive(Default)]
@@ -16,38 +50,28 @@ pub struct NetworkMetadata {
 }
 
 #[derive(Default)]
-pub struct NetworkPacket {
-    pub packet  : Packet,            
+pub struct NetworkData {
+    pub packet  : NetworkPacket,            
     pub metadata: NetworkMetadata, 
 }
 
 
-impl Packet {
-    pub fn create_packet(_id: u64) -> Packet {
-        Packet { id: _id }
-    }
+impl NetworkData {
 
-    pub fn to_bytes(&self) -> [u8; 16] {
-        let mut bytes = [0u8; 16]; // 16 * 8 = 128 bits
-        bytes[0..8].copy_from_slice(&self.id.to_le_bytes());
-        
-        bytes
-    }
-
-    pub fn to_packet(_data: &[u8], _meta: &[MaybeUninit::<u8>]) -> io::Result<NetworkPacket> {
+    pub fn to_packet(_data: &[u8], _meta: &[MaybeUninit::<u8>]) -> io::Result<NetworkData> {
         let mut id_bytes = [0u8; 8]; // Allocate space for Bytes
         id_bytes.copy_from_slice(&_data[0..8]); // move bytes to id
         let id = u64::from_le_bytes(id_bytes); // convert bytes to int
-        let packet = Packet { id };
+        let packet = NetworkPacket::new(id, 0, 0 );
 
-        let metadata = Packet::process_metadata(_meta).ok_or_else(|| {
+        let metadata = NetworkData::process_metadata(_meta).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "Required SO_TIMESTAMPING control message missing from buffer",
             )
         })?;
 
-        Ok(NetworkPacket { packet , metadata })
+        Ok(NetworkData { packet , metadata })
     }
 
 
@@ -98,5 +122,4 @@ impl Packet {
         
         None
     }
-
 }

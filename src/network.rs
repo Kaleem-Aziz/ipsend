@@ -6,7 +6,7 @@ use std::time::Instant;
 use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
 
 use crate::packet::Packet; 
-use crate::packet::NetworkPacket; 
+use crate::packet::NetworkData; 
 
 pub struct NetworkClient {
     socket: UdpSocket,
@@ -22,7 +22,7 @@ pub struct NetworkInfo {
     pub max_latency         : u64,
     pub min_latency         : u64,
     pub process_time        : Instant,
-    pub last_packet         : NetworkPacket,
+    pub last_packet         : NetworkData,
     pub missing_ids         : Vec<u64>,
     
 }   
@@ -49,12 +49,14 @@ impl NetworkClient {
             let flags: libc::c_uint = 
                 libc::SOF_TIMESTAMPING_RX_SOFTWARE | // Kernel network stack ingress
                 libc::SOF_TIMESTAMPING_RX_HARDWARE | // Physical NIC hardware ingress
+                libc::SOF_TIMESTAMPING_RAW_HARDWARE|
                 libc::SOF_TIMESTAMPING_SOFTWARE;     // Enable overall reporting framework
+
 
             if libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,
-                libc::SO_TIMESTAMPING,
+                libc::SCM_TIMESTAMPING,
                 &flags as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
             ) != 0 {
@@ -87,6 +89,7 @@ impl NetworkClient {
             
 
             let amt = socket_ref.recvmsg(&mut msg, 0)?;
+            let control_len = msg.control_len();
 
             network_info.start_time();
 
@@ -99,7 +102,7 @@ impl NetworkClient {
             };
 
             
-            let packet = Packet::to_packet(received, &control_buf)?; 
+            let packet = NetworkData::to_packet(received, &control_buf[..control_len])?; 
             network_info.update_info(&packet)?;
 
         }
@@ -107,7 +110,7 @@ impl NetworkClient {
         Ok(())
     }
     
-    pub fn send_message(_target_addr: &str) -> io::Result<()> {
+    pub fn send_message(_target_addr: &str, payload_size: &usize) -> io::Result<()> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
 
         let addr: SocketAddr = _target_addr.parse()
@@ -115,8 +118,15 @@ impl NetworkClient {
 
         socket.connect(&addr.into())?;
 
+        let mut max_buffer = [0u8; 65507]; 
+
+        if *payload_size > max_buffer.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size exceeds maximum buffer limit"));
+        }
+        let padding = &mut max_buffer[..*payload_size];
+
         for i in 1..10 {
-            let packet = Packet::create_packet(i*10);
+            let mut packet = Packet::new(i*10, padding);
             socket.send(&packet.to_bytes())?;
         }
 
@@ -136,16 +146,16 @@ impl NetworkInfo {
             recv_out_of_order   : 0,
             pcr                 : 0,
             avg_latency         : 0,
-            max_latency         : 0,
-            min_latency         : 0,
+            max_latency         : u64::MIN,
+            min_latency         : u64::MAX,
             process_time        : Instant::now(),
-            last_packet         : NetworkPacket::default(),
+            last_packet         : NetworkData::default(),
             missing_ids         : Vec::new(),
 
         }
     }
 
-    pub fn update_info(&mut self, _packet: &NetworkPacket) -> io::Result<()> {
+    pub fn update_info(&mut self, _packet: &NetworkData) -> io::Result<()> {
 
         self.update_packet_tracking(&_packet)?;
         let elapsed = self.process_time.elapsed();
@@ -165,7 +175,7 @@ impl NetworkInfo {
         self.process_time = Instant::now();
     }
 
-    fn update_packet_tracking(&mut self, _packet: &NetworkPacket) -> io::Result<()> {
+    fn update_packet_tracking(&mut self, _packet: &NetworkData) -> io::Result<()> {
         
         if self.last_packet.packet.id  >= _packet.packet.id  {
             println!("Old Packet");

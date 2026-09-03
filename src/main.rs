@@ -12,12 +12,15 @@ fn main() -> io::Result<()> {
     let ip_addr = &args[2];
 
 
-    
     if query == "1" {
         let client = network::NetworkClient::setup(ip_addr)?;
         client.start_listening()?;
     } else {
-        network::NetworkClient::send_message(ip_addr)?;
+        let bytes: usize = args[3]
+            .parse::<usize>()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Could not parse argument: {}", e)))?;
+
+        network::NetworkClient::send_message(ip_addr, &bytes)?;
     }
 
     
