@@ -16,24 +16,6 @@ pub struct NetworkClient {
 }
 
 
-pub struct NetworkInfo {
-    pub next_id             : u64,
-    pub expected_amount     : u64,  
-    pub recv_out_of_order   : u64,
-    pub pcr                 : f64,
-    pub avg_latency         : u64,
-    pub max_latency         : u64,
-    pub min_latency         : u64,
-    pub network_loss        : u64,
-    pub kernal_loss         : u64,
-    pub packet_count        : u64,
-    pub process_time        : Duration,
-    pub process_time_inst   : Instant,
-    pub last_packet         : NetworkData,
-    pub missing_ids         : HashSet<u64>,
-    
-}   
-
 unsafe fn set_opt<T>(fd: i32, level: i32, name: i32, val: &T) -> io::Result<()> {
     if libc::setsockopt(fd, level, name,
                         val as *const _ as *const libc::c_void,
@@ -42,7 +24,6 @@ unsafe fn set_opt<T>(fd: i32, level: i32, name: i32, val: &T) -> io::Result<()> 
     }
     Ok(())
 }
-
 
 
 impl NetworkClient {
@@ -178,6 +159,66 @@ impl NetworkClient {
     
 }
 
+#[derive(Default)]
+pub struct NetworkLatency {
+    // Accpeting processing copy will cause packet delay
+    pub latency             : Vec<f64>,
+    pub avg_latency         : f64,
+    pub max_latency         : f64,
+    pub min_latency         : f64,
+    pub p_50                : f64,
+    pub p_99                : f64,
+    pub p_99_9              : f64,
+}
+
+impl NetworkLatency {
+
+   pub fn calc_latency(&mut self, later: &Duration, earlier: &Duration) -> Option<f64> {
+        let ms = later.checked_sub(*earlier)?.as_secs_f64() * 1000.0;
+        self.latency.push(ms);
+        Some(ms)
+    }
+
+    fn quantile(&self, q: f64) -> f64 {
+        let n = self.latency.len();
+        let rank = ((q * n as f64).ceil() as usize).saturating_sub(1);
+        self.latency[rank.min(n - 1)]
+    }
+
+    pub fn result(&mut self) {
+        self.latency.sort_by(|a, b| a.total_cmp(b));
+
+        let sum: f64 = self.latency.iter().sum();
+
+        self.avg_latency = sum / self.latency.len() as f64;
+        self.max_latency = self.latency[self.latency.len()-1];
+        self.min_latency = self.latency[0];
+        self.p_50   = self.quantile(0.50);
+        self.p_99   = self.quantile(0.99);
+        self.p_99_9 = self.quantile(0.999);
+    }
+}
+
+
+pub struct NetworkInfo {
+    pub next_id             : u64,
+    pub expected_amount     : u64,  
+    pub recv_out_of_order   : u64,
+    pub pcr                 : f64,
+    pub network_loss        : u64,
+    pub kernal_loss         : u64,
+    pub packet_count        : u64,
+
+    pub network_latency     : NetworkLatency,
+    pub total_latency       : NetworkLatency,
+
+    pub process_time        : Duration,
+    pub process_time_inst   : Instant,
+    pub last_packet         : NetworkData,
+    pub missing_ids         : HashSet<u64>,
+    
+}   
+
 
 impl NetworkInfo {
 
@@ -192,12 +233,13 @@ impl NetworkInfo {
             expected_amount     : 0,  
             recv_out_of_order   : 0,
             pcr                 : 0.0,
-            avg_latency         : 0,
             network_loss        : 0,
             kernal_loss         : 0,
             packet_count        : 0,
-            max_latency         : u64::MIN,
-            min_latency         : u64::MAX,
+            
+            network_latency     : NetworkLatency::default(),
+            total_latency       : NetworkLatency::default(),
+
             process_time        : p_time,
             process_time_inst   : Instant::now(),
             last_packet         : NetworkData::default(),
@@ -211,43 +253,32 @@ impl NetworkInfo {
         self.update_packet_tracking(&_packet)?;
         self.update_kernal_overlow(&_packet.metadata)?;
 
-        
-        self.calc_network_latency(&_packet);
-        self.calc_total_latency(&_packet);
-
         self.calc_pcr();
-        println!(
-                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n Ovfl {} Missing Pkts Count {}\n
-PCR {}",
-                _packet.packet.packet_size,
-                _packet.packet.id,
-                self.calc_process_latency(),
-                _packet.metadata.is_hardware, 
-                _packet.metadata.sec, 
-                _packet.metadata.nsec,
-                _packet.metadata.ovfl_count,
-                self.missing_ids.len(),
-                self.pcr,
-            );
 
+        let net   = self.calc_network_latency(&_packet);
+        let total = self.calc_total_latency(&_packet);
+
+        println!(
+            "[{:>8}] {:>6} B  {}  net {:>9}  total {:>9}  proc {:>7?}  ovfl {:>6}  miss {:>6}  pcr {:>7.3}%",
+            _packet.packet.id,
+            _packet.packet.packet_size,
+            if _packet.metadata.is_hardware { "HW" } else { "SW" },
+            net.map_or("--".to_string(),   |v| format!("{:.3} ms", v)),
+            total.map_or("--".to_string(), |v| format!("{:.3} ms", v)),
+            self.calc_process_latency(),
+            self.kernal_loss,
+            self.missing_ids.len(),
+            self.pcr,
+        );
         Ok(())
     }
 
-    pub fn calc_total_latency(&self, _packet: &NetworkData) {
-
-        match self.process_time.checked_sub(_packet.packet.tx_time) {
-            Some(latency) => println!("one-way: {:?} {:?}", latency, latency.as_secs_f64() * 1000.0),
-            None          => println!("negative latency — clock skew"),
-        }
+    pub fn calc_total_latency(&mut self, _packet: &NetworkData) -> Option<f64>{        
+        self.total_latency.calc_latency(&self.process_time, &_packet.packet.tx_time)
     }
 
-    pub fn calc_network_latency(&self, _packet: &NetworkData) {
-    
-        match _packet.metadata.rx_time.checked_sub(_packet.packet.tx_time) {
-            Some(latency) => println!("one-way: {:?} {:?}", latency, latency.as_secs_f64() * 1000.0),
-            None          => println!("negative latency — clock skew"),
-        }
-
+    pub fn calc_network_latency(&mut self, _packet: &NetworkData) -> Option<f64>{        
+        self.network_latency.calc_latency(&_packet.metadata.rx_time, &_packet.packet.tx_time)
     }
 
     pub fn calc_process_latency(&self) -> Duration {
@@ -295,5 +326,32 @@ PCR {}",
         }
 
         Ok(())
+    }
+
+
+
+    pub fn report(&mut self) {
+        self.network_latency.result();
+        self.total_latency.result();
+
+        let bar = "─".repeat(58);
+        println!("\n{bar}");
+        println!(" packets received      {:>12}", self.packet_count);
+        println!(" missing (end-to-end)  {:>12}", self.missing_ids.len());
+        println!(" kernel drops (ovfl)   {:>12}", self.kernal_loss);
+        println!(" PCR                   {:>12.3} %", self.pcr);
+        println!("{bar}");
+        println!(" latency (ms)  {:>14} {:>14}", "network", "total");
+        for (label, a, b) in [
+            ("min",   self.network_latency.min_latency, self.total_latency.min_latency),
+            ("p50",   self.network_latency.p_50,        self.total_latency.p_50),
+            ("p99",   self.network_latency.p_99,        self.total_latency.p_99),
+            ("p99.9", self.network_latency.p_99_9,      self.total_latency.p_99_9),
+            ("max",   self.network_latency.max_latency, self.total_latency.max_latency),
+            ("avg",   self.network_latency.avg_latency, self.total_latency.avg_latency),
+        ] {
+            println!("   {:<10} {:>14.3} {:>14.3}", label, a, b);
+        }
+        println!("{bar}\n");
     }
 }
