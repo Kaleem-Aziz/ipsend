@@ -3,10 +3,13 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::mem::MaybeUninit;
 use std::time::Instant;
+use std::collections::HashSet;
 use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
+
 
 use crate::packet::Packet; 
 use crate::packet::NetworkData; 
+use crate::packet::NetworkMetadata; 
 
 pub struct NetworkClient {
     socket: UdpSocket,
@@ -25,7 +28,7 @@ pub struct NetworkInfo {
     pub kernal_loss         : u64,
     pub process_time        : Instant,
     pub last_packet         : NetworkData,
-    pub missing_ids         : Vec<u64>,
+    pub missing_ids         : HashSet<u64>,
     
 }   
 
@@ -161,7 +164,7 @@ impl NetworkClient {
         }
         let padding = &mut max_buffer[..*payload_size];
 
-        for i in 1..1000 {
+        for i in 0..1000 {
             let mut packet = Packet::new(i, padding);
             socket.send(&packet.to_bytes())?;
         }
@@ -177,7 +180,7 @@ impl NetworkInfo {
 
     pub fn new() -> Self {
         Self {
-            next_id             : 0,
+            next_id             : 1,
             expected_amount     : 0,  
             recv_out_of_order   : 0,
             pcr                 : 0,
@@ -188,7 +191,7 @@ impl NetworkInfo {
             min_latency         : u64::MAX,
             process_time        : Instant::now(),
             last_packet         : NetworkData::default(),
-            missing_ids         : Vec::new(),
+            missing_ids         : HashSet::new(),
 
         }
     }
@@ -196,20 +199,20 @@ impl NetworkInfo {
     pub fn update_info(&mut self, _packet: &NetworkData) -> io::Result<()> {
 
         self.update_packet_tracking(&_packet)?;
-
         self.update_kernal_overlow(&_packet.metadata)?;
 
         let elapsed = self.process_time.elapsed();
 
             println!(
-                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n {}",
+                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n Ovfl {} Missing Pkts Count {}",
                 _packet.packet.packet_size,
                 _packet.packet.id,
                 elapsed,
                 _packet.metadata.is_hardware, 
                 _packet.metadata.sec, 
                 _packet.metadata.nsec,
-                _meta.ovfl_count,
+                _packet.metadata.ovfl_count,
+                self.missing_ids.len()
             );
 
         Ok(())
@@ -227,13 +230,19 @@ impl NetworkInfo {
 
     fn update_packet_tracking(&mut self, _packet: &NetworkData) -> io::Result<()> {
         
-        if self.last_packet.packet.id  >= _packet.packet.id  {
-            println!("Old Packet");
-        } else {
+        if self.last_packet.packet.id  > _packet.packet.id  {
+            println!("Old Packet old {}  rx {}" ,self.last_packet.packet.id, _packet.packet.id );
 
-            if self.next_id != _packet.packet.id {
+            if self.missing_ids.contains(&_packet.packet.id) {
+                self.missing_ids.remove(&_packet.packet.id);
+            }
+
+        } 
+        else {
+
+            if _packet.packet.id > self.next_id  {
                 println!("Jumped Ahead");
-                for i in self.last_packet.packet.id .._packet.packet.id+1 { self.missing_ids.push(i); }
+                for i in self.last_packet.packet.id .._packet.packet.id+1 { self.missing_ids.insert(i); }
             }
 
             self.last_packet.packet.id  = _packet.packet.id;
