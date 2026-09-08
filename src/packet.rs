@@ -64,7 +64,7 @@ impl NetworkData {
         
 
         let (id, tx_sec, tx_nsec) = NetworkData::process_header(_hdr)?;
-        let packet_size = (_data.len()) as u64;
+        let packet_size = (_data.len()) as u64 + (_hdr.len()) as u64;
         
         let packet = NetworkPacket::new(id, tx_sec, tx_nsec, packet_size);
 
@@ -95,56 +95,58 @@ impl NetworkData {
         Ok((id, tx_sec, tx_nsec))
     }
 
-    pub fn process_metadata(_buf: &[u8]) -> Option<NetworkMetadata> {
-        
-        if !_buf.is_empty() { 
-            unsafe {
-                // Setup temporary msghdr using the pointer
-                let mut msg: libc::msghdr = std::mem::zeroed();
-                msg.msg_control    = _buf.as_ptr() as *mut libc::c_void;   
-                msg.msg_controllen = _buf.len();
+    pub fn process_metadata(buf: &[u8]) -> Option<NetworkMetadata> {
+        if buf.is_empty() {
+            return None;
+        }
 
-                
-                let mut ts: Option<(i64, i64, bool)> = None;
-                let mut ovfl: Option<u32> = None;
-                // Hand the address of the temporary msghdr structure to the POSIX macros
-                let mut cmsg = libc::CMSG_FIRSTHDR(&msg); // Point to first Contorl Message
-                
-                while !cmsg.is_null() {
-                    // Validate the control message is from SOL_SOCKET and is SCM_TIMESTAMPING
-                    if (*cmsg).cmsg_level == libc::SOL_SOCKET {
-                        
-                        match (*cmsg).cmsg_type {
-                            libc::SCM_TIMESTAMPING => {
-                                let ts_ptr = libc::CMSG_DATA(cmsg) as *const libc::timespec;
-                                // Grab and split timestamps
-                                let timestamps = std::slice::from_raw_parts(ts_ptr, 3);
-                                
-                                let sw_ts = timestamps[0]; // Filled on loopback and physical networks
-                                let hw_ts = timestamps[2]; // Only filled on real NICs with HW support
+        let mut ts:   Option<(i64, i64, bool)> = None;
+        let mut ovfl: Option<u64>              = None;
 
-                                let (sec, nsec, is_hardware) = if hw_ts.tv_sec != 0 {
-                                    (hw_ts.tv_sec, hw_ts.tv_nsec, true)
-                                } else {
-                                    (sw_ts.tv_sec, sw_ts.tv_nsec, false)
-                                };
-                                                        
-                                let time = Duration::new(sec as u64, nsec as u32);
-                                ts = Some(sec, nsec, is_hardware);
-                            }
+        unsafe {
+            let mut msg: libc::msghdr = std::mem::zeroed();
+            msg.msg_control    = buf.as_ptr() as *mut libc::c_void;
+            msg.msg_controllen = buf.len();
 
-                            libc::SO_RXQ_OVFL => {
-                                ovfl = Some(*(libc::CMSG_DATA(cmsg) as *const u32));
-                            }
+            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_SOCKET {
+                    match (*cmsg).cmsg_type {
 
+                        // Gather the timestamp of Packets
+                        libc::SCM_TIMESTAMPING => {
+                            let ts_ptr = libc::CMSG_DATA(cmsg) as *const libc::timespec;
+                            let timestamps = std::slice::from_raw_parts(ts_ptr, 3);
+                            let sw_ts = timestamps[0];
+                            let hw_ts = timestamps[2];
+
+                            let (sec, nsec, is_hardware) = if hw_ts.tv_sec != 0 {
+                                (hw_ts.tv_sec, hw_ts.tv_nsec, true)
+                            } else {
+                                (sw_ts.tv_sec, sw_ts.tv_nsec, false)
+                            };
+                            ts = Some((sec, nsec, is_hardware)); 
                         }
-                            
+
+                        // Amount of packets lost due to socket RX Queue being full
+                        libc::SO_RXQ_OVFL => {
+                            ovfl = Some(*(libc::CMSG_DATA(cmsg) as *const u64));
+                        }
+                        
+                        // Default 
+                        _ => {}                                  
                     }
-                    cmsg = libc::CMSG_NXTHDR(&msg, cmsg); // Move to next Contorl Message
                 }
+                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
             }
         }
-        Some(NetworkMetadata { sec, nsec, time, is_hardware, ovfl })
+
+        let (sec, nsec, is_hardware) = ts?;
+        let ovfl_count = ovfl.unwrap_or(0) as u64;
+
+        let time = Duration::new(sec as u64, nsec as u32);
+        Some(NetworkMetadata { sec, nsec, time, is_hardware,  ovfl_count })
     }
+
         
 }

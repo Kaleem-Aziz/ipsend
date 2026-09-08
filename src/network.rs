@@ -161,7 +161,7 @@ impl NetworkClient {
         }
         let padding = &mut max_buffer[..*payload_size];
 
-        for i in 1..10 {
+        for i in 1..1000 {
             let mut packet = Packet::new(i, padding);
             socket.send(&packet.to_bytes())?;
         }
@@ -182,6 +182,8 @@ impl NetworkInfo {
             recv_out_of_order   : 0,
             pcr                 : 0,
             avg_latency         : 0,
+            network_loss        : 0,
+            kernal_loss         : 0,
             max_latency         : u64::MIN,
             min_latency         : u64::MAX,
             process_time        : Instant::now(),
@@ -194,16 +196,20 @@ impl NetworkInfo {
     pub fn update_info(&mut self, _packet: &NetworkData) -> io::Result<()> {
 
         self.update_packet_tracking(&_packet)?;
+
+        self.update_kernal_overlow(&_packet.metadata)?;
+
         let elapsed = self.process_time.elapsed();
 
             println!(
-                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n",
+                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n {}",
                 _packet.packet.packet_size,
                 _packet.packet.id,
                 elapsed,
                 _packet.metadata.is_hardware, 
                 _packet.metadata.sec, 
-                _packet.metadata.nsec
+                _packet.metadata.nsec,
+                _meta.ovfl_count,
             );
 
         Ok(())
@@ -212,6 +218,11 @@ impl NetworkInfo {
 
     pub fn start_time(&mut self) {
         self.process_time = Instant::now();
+    }
+
+    pub fn update_kernal_overlow(&mut self, _meta: &NetworkMetadata) -> io::Result<()> {
+        self.kernal_loss = _meta.ovfl_count;
+        Ok(())
     }
 
     fn update_packet_tracking(&mut self, _packet: &NetworkData) -> io::Result<()> {
