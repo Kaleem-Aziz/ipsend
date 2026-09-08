@@ -2,7 +2,7 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::mem::MaybeUninit;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::collections::HashSet;
 use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
 
@@ -20,13 +20,15 @@ pub struct NetworkInfo {
     pub next_id             : u64,
     pub expected_amount     : u64,  
     pub recv_out_of_order   : u64,
-    pub pcr                 : u64,
+    pub pcr                 : f64,
     pub avg_latency         : u64,
     pub max_latency         : u64,
     pub min_latency         : u64,
     pub network_loss        : u64,
     pub kernal_loss         : u64,
-    pub process_time        : Instant,
+    pub packet_count        : u64,
+    pub process_time        : Duration,
+    pub process_time_inst   : Instant,
     pub last_packet         : NetworkData,
     pub missing_ids         : HashSet<u64>,
     
@@ -86,6 +88,30 @@ impl NetworkClient {
 
     }
     
+    pub fn send_message(_target_addr: &str, payload_size: &usize) -> io::Result<()> {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
+
+        let addr: SocketAddr = _target_addr.parse()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+        socket.connect(&addr.into())?;
+
+        let mut max_buffer = [0u8; 65507]; 
+
+        if *payload_size > max_buffer.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size exceeds maximum buffer limit"));
+        }
+        let padding = &mut max_buffer[..*payload_size];
+
+        for i in 0..1000 {
+            let mut packet = Packet::new(i, padding);
+            socket.send(&packet.to_bytes())?;
+        }
+
+        Ok(())
+        
+    }
+
     pub fn start_listening (&self) -> io::Result<()> {
 
         let mut network_info = NetworkInfo::new();
@@ -133,7 +159,7 @@ impl NetworkClient {
             let payload_len = amt - HEADER_SIZE;
             let control_len = msg.control_len();
 
-            network_info.start_time();
+            network_info.start_process_time();
             
 
             // Fat pointer to our  memory 
@@ -149,29 +175,6 @@ impl NetworkClient {
         Ok(())
     }
     
-    pub fn send_message(_target_addr: &str, payload_size: &usize) -> io::Result<()> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
-
-        let addr: SocketAddr = _target_addr.parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-        socket.connect(&addr.into())?;
-
-        let mut max_buffer = [0u8; 65507]; 
-
-        if *payload_size > max_buffer.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size exceeds maximum buffer limit"));
-        }
-        let padding = &mut max_buffer[..*payload_size];
-
-        for i in 0..1000 {
-            let mut packet = Packet::new(i, padding);
-            socket.send(&packet.to_bytes())?;
-        }
-
-        Ok(())
-        
-    }
     
 }
 
@@ -179,17 +182,24 @@ impl NetworkClient {
 impl NetworkInfo {
 
     pub fn new() -> Self {
+
+        let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
+        
+        let p_time = Duration::new(now.tv_sec as u64, now.tv_nsec as u32);
         Self {
             next_id             : 1,
             expected_amount     : 0,  
             recv_out_of_order   : 0,
-            pcr                 : 0,
+            pcr                 : 0.0,
             avg_latency         : 0,
             network_loss        : 0,
             kernal_loss         : 0,
+            packet_count        : 0,
             max_latency         : u64::MIN,
             min_latency         : u64::MAX,
-            process_time        : Instant::now(),
+            process_time        : p_time,
+            process_time_inst   : Instant::now(),
             last_packet         : NetworkData::default(),
             missing_ids         : HashSet::new(),
 
@@ -201,26 +211,61 @@ impl NetworkInfo {
         self.update_packet_tracking(&_packet)?;
         self.update_kernal_overlow(&_packet.metadata)?;
 
-        let elapsed = self.process_time.elapsed();
+        
+        self.calc_network_latency(&_packet);
+        self.calc_total_latency(&_packet);
 
-            println!(
-                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n Ovfl {} Missing Pkts Count {}",
+        self.calc_pcr();
+        println!(
+                "Received  bytes {} id={}, processing took {:?} Transmit time  \nCaptured TS (HW={}): {}.{:09}s \n Ovfl {} Missing Pkts Count {}\n
+PCR {}",
                 _packet.packet.packet_size,
                 _packet.packet.id,
-                elapsed,
+                self.calc_process_latency(),
                 _packet.metadata.is_hardware, 
                 _packet.metadata.sec, 
                 _packet.metadata.nsec,
                 _packet.metadata.ovfl_count,
-                self.missing_ids.len()
+                self.missing_ids.len(),
+                self.pcr,
             );
 
         Ok(())
     }
 
+    pub fn calc_total_latency(&self, _packet: &NetworkData) {
 
-    pub fn start_time(&mut self) {
-        self.process_time = Instant::now();
+        match self.process_time.checked_sub(_packet.packet.tx_time) {
+            Some(latency) => println!("one-way: {:?} {:?}", latency, latency.as_secs_f64() * 1000.0),
+            None          => println!("negative latency — clock skew"),
+        }
+    }
+
+    pub fn calc_network_latency(&self, _packet: &NetworkData) {
+    
+        match _packet.metadata.rx_time.checked_sub(_packet.packet.tx_time) {
+            Some(latency) => println!("one-way: {:?} {:?}", latency, latency.as_secs_f64() * 1000.0),
+            None          => println!("negative latency — clock skew"),
+        }
+
+    }
+
+    pub fn calc_process_latency(&self) -> Duration {
+        self.process_time_inst.elapsed()
+    }
+
+    pub fn calc_pcr(&mut self) {
+        let count           = self.packet_count as f64;
+        let missing_count   = self.missing_ids.len() as f64;
+        self.pcr = count / (count +  missing_count) * 100.0;
+    }
+
+    pub fn start_process_time(&mut self) {
+        self.process_time_inst = Instant::now();
+
+        let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
+        self.process_time = Duration::new(now.tv_sec as u64, now.tv_nsec as u32);
     }
 
     pub fn update_kernal_overlow(&mut self, _meta: &NetworkMetadata) -> io::Result<()> {
@@ -231,22 +276,22 @@ impl NetworkInfo {
     fn update_packet_tracking(&mut self, _packet: &NetworkData) -> io::Result<()> {
         
         if self.last_packet.packet.id  > _packet.packet.id  {
-            println!("Old Packet old {}  rx {}" ,self.last_packet.packet.id, _packet.packet.id );
 
             if self.missing_ids.contains(&_packet.packet.id) {
                 self.missing_ids.remove(&_packet.packet.id);
+                self.packet_count+=1;
             }
 
         } 
         else {
 
             if _packet.packet.id > self.next_id  {
-                println!("Jumped Ahead");
                 for i in self.last_packet.packet.id .._packet.packet.id+1 { self.missing_ids.insert(i); }
             }
 
             self.last_packet.packet.id  = _packet.packet.id;
             self.next_id = self.last_packet.packet.id + 1;
+            self.packet_count+=1;
         }
 
         Ok(())

@@ -32,13 +32,14 @@ pub struct NetworkPacket {
     pub id          : u64,   // 8 bytes
     pub tx_sec      : u64,   // 8 bytes 
     pub tx_nsec     : u64,   // 8 bytes 
+    pub tx_time     : Duration,
     pub packet_size : u64,   // 8 bytes
 
 }
 
 impl NetworkPacket {
-    pub fn new(id: u64, tx_sec: u64, tx_nsec: u64, packet_size: u64) -> Self {
-        NetworkPacket { id, tx_sec, tx_nsec, packet_size }
+    pub fn new(id: u64, tx_sec: u64, tx_nsec: u64, tx_time: Duration, packet_size: u64) -> Self {
+        NetworkPacket { id, tx_sec, tx_nsec, tx_time, packet_size }
     }
 }
 
@@ -46,7 +47,7 @@ impl NetworkPacket {
 pub struct NetworkMetadata {
     pub sec         : libc::time_t,
     pub nsec        : libc::c_long,
-    pub time        : Duration,
+    pub rx_time     : Duration,
     pub is_hardware : bool,
     pub ovfl_count  : u64,
 }
@@ -63,10 +64,10 @@ impl NetworkData {
     pub fn to_packet(_hdr: &[u8], _data: &[u8], _meta: &[u8]) -> io::Result<NetworkData> {
         
 
-        let (id, tx_sec, tx_nsec) = NetworkData::process_header(_hdr)?;
+        let (id, tx_sec, tx_nsec, tx_time) = NetworkData::process_header(_hdr)?;
         let packet_size = (_data.len()) as u64 + (_hdr.len()) as u64;
         
-        let packet = NetworkPacket::new(id, tx_sec, tx_nsec, packet_size);
+        let packet = NetworkPacket::new(id, tx_sec, tx_nsec, tx_time, packet_size);
 
         let metadata = NetworkData::process_metadata(_meta).ok_or_else(|| {
             io::Error::new(
@@ -78,7 +79,7 @@ impl NetworkData {
         Ok(NetworkData { packet , metadata })
     }
 
-    pub fn process_header(buf: &[u8]) -> io::Result<(u64, u64, u64)> {
+    pub fn process_header(buf: &[u8]) -> io::Result<(u64, u64, u64, Duration)> {
         // Ensure the buffer has at least 24 bytes to prevent panics
         if buf.len() < 24 {
             return Err(io::Error::new(
@@ -91,8 +92,9 @@ impl NetworkData {
         let id = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let tx_sec = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         let tx_nsec = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+        let time = Duration::new(tx_sec as u64, tx_nsec as u32);
 
-        Ok((id, tx_sec, tx_nsec))
+        Ok((id, tx_sec, tx_nsec, time))
     }
 
     pub fn process_metadata(buf: &[u8]) -> Option<NetworkMetadata> {
@@ -144,8 +146,8 @@ impl NetworkData {
         let (sec, nsec, is_hardware) = ts?;
         let ovfl_count = ovfl.unwrap_or(0) as u64;
 
-        let time = Duration::new(sec as u64, nsec as u32);
-        Some(NetworkMetadata { sec, nsec, time, is_hardware,  ovfl_count })
+        let rx_time = Duration::new(sec as u64, nsec as u32);
+        Some(NetworkMetadata { sec, nsec, rx_time, is_hardware,  ovfl_count })
     }
 
         
