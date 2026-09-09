@@ -69,7 +69,9 @@ impl NetworkClient {
 
     }
     
-    pub fn send_message(_target_addr: &str, payload_size: &usize) -> io::Result<()> {
+    pub fn send_message(_target_addr: &str, payload_size: &usize, count: &Option<u64>,
+                         pps: &Option<u64>) -> io::Result<()> {
+                            
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
 
         let addr: SocketAddr = _target_addr.parse()
@@ -80,7 +82,7 @@ impl NetworkClient {
         let mut max_buffer = [0u8; 65507]; 
 
         if *payload_size > max_buffer.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size exceeds maximum buffer limit"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size exceeds maximum buffer limit of 65507"));
         }
         let padding = &mut max_buffer[..*payload_size];
 
@@ -317,7 +319,7 @@ impl NetworkInfo {
         else {
 
             if _packet.packet.id > self.next_id  {
-                for i in self.last_packet.packet.id .._packet.packet.id+1 { self.missing_ids.insert(i); }
+                for i in self.last_packet.packet.id+1 .._packet.packet.id { self.missing_ids.insert(i); }
             }
 
             self.last_packet.packet.id  = _packet.packet.id;
