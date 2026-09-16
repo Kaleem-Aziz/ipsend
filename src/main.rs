@@ -7,6 +7,8 @@ use std::time::Duration;
 mod args;
 mod network;
 mod packet;
+mod stats;
+mod network_packet;
 
 use crate::args::Cli; 
 use crate::args::Mode; 
@@ -23,6 +25,10 @@ fn main() -> io::Result<()> {
         }
 
         Mode::Send { addr, size, count, interval, pps, bps } => {
+
+            if size > 65507 || size < 24 {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size must be between 24 & 65507 B"));
+            }
 
             let iv = calculate_interval(&size, &pps, &interval, &bps)?;
             network::NetworkClient::send_message(&addr, &size, &count, &iv)?;
