@@ -27,7 +27,7 @@ impl <'a> Packet<'a>  {
 }
 
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy) ]
 pub struct NetworkPacket {
     pub id              : u64,   // 8 bytes
     pub tx_timestamp    : NetworkTimestamp,
@@ -41,14 +41,14 @@ impl NetworkPacket {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct NetworkMetadata {
     pub sw_timestamp    : NetworkTimestamp,
     pub hw_timestamp    : Option<NetworkTimestamp>,
     pub ovfl_count      : u32,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct NetworkTimestamp {
     pub time: Duration,
 }
@@ -66,7 +66,7 @@ impl NetworkTimestamp {
 }
 
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct NetworkData {
     pub packet  : NetworkPacket,            
     pub metadata: NetworkMetadata, 
