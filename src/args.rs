@@ -30,6 +30,10 @@ pub enum Mode {
     },
 
     /// Send test packets
+    #[command(group(
+            clap::ArgGroup::new("rate")
+                .args(["pps", "bps", "interval"])
+                .required(true) ))]
     Send {
         /// Destination, e.g. 10.0.0.5:9000
         #[arg(long, short)]
@@ -39,12 +43,20 @@ pub enum Mode {
         #[arg(short = 'b', long = "bytes", default_value_t = 576)] // minimum range 24 / Max Range 65507
         size: usize,
 
-        /// Number of packets to send
-        #[arg(short = 'c', long = "count")]
-        count: Option<u64>,
+        /// Seconds between packets 
+        #[arg(short = 'i' )]
+        interval: Option<f64>,
 
-        /// Rate limit in packets per second (unlimited if omitted)
-        #[arg(short = 'p', long = "pps")]
+        /// Number of packets to send
+        #[arg(short = 'c', long = "count", default_value_t=-1)]
+        count: i64,
+
+        /// Rate limit in packets per second 
+        #[arg(long = "pps")]
         pps: Option<u64>,
+
+        /// How many bits per second to send
+        #[arg(long = "bps")]
+        bps: Option<u64>,
     },
 }

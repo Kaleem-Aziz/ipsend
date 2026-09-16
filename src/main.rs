@@ -1,6 +1,7 @@
 use std::io;
 use std::env;
 use clap::Parser;
+use std::time::Duration;
 
 
 mod args;
@@ -21,25 +22,33 @@ fn main() -> io::Result<()> {
         
         }
 
-        Mode::Send { addr, size, count, pps } => {
-            network::NetworkClient::send_message(&addr, &size, &count, &pps)?;
+        Mode::Send { addr, size, count, interval, pps, bps } => {
+
+            let iv = calculate_interval(&size, &pps, &interval, &bps)?;
+            network::NetworkClient::send_message(&addr, &size, &count, &iv)?;
         }
     }
-
-
-    // if query == "1" {
-    //     let client = network::NetworkClient::setup(ip_addr)?;
-    //     client.start_listening()?;
-    // } else {
-    //     let bytes: usize = args[3]
-    //         .parse::<usize>()
-    //         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Could not parse argument: {}", e)))?;
-
-    //     network::NetworkClient::send_message(ip_addr, &bytes)?;
-    // }
-
     
     Ok(())
+}
+
+
+fn calculate_interval(size: &usize, pps: &Option<u64>, interval: &Option<f64>, bps: &Option<u64>) 
+                          -> io::Result<Duration> {
+    
+    const NS_PER_SEC: u64 = 1_000_000_000;            // unit conversion
+    const DEFAULT_INTERVAL_NS: u64 = 1_000_000_000;   // 1 packet/sec
+
+    let interval_ns: u64 = match (*pps, *interval, *bps) {
+        (Some(p), _, _) if p > 0   => NS_PER_SEC / p,
+        (_, Some(i), _) if i > 0.0 => (i * NS_PER_SEC as f64) as u64,
+        (_, _, Some(b)) if b > 0   => *size as u64 * 8 * NS_PER_SEC / b,
+        _                          => DEFAULT_INTERVAL_NS,
+    };
+
+
+    Ok(Duration::from_nanos(interval_ns))
+
 }
 
 

@@ -29,28 +29,42 @@ impl <'a> Packet<'a>  {
 
 #[derive(Default)]
 pub struct NetworkPacket {
-    pub id          : u64,   // 8 bytes
-    pub tx_sec      : u64,   // 8 bytes 
-    pub tx_nsec     : u64,   // 8 bytes 
-    pub tx_time     : Duration,
-    pub packet_size : u64,   // 8 bytes
+    pub id              : u64,   // 8 bytes
+    pub tx_timestamp    : NetworkTimestamp,
+    pub packet_size     : u64,   // 8 bytes
 
 }
 
 impl NetworkPacket {
-    pub fn new(id: u64, tx_sec: u64, tx_nsec: u64, tx_time: Duration, packet_size: u64) -> Self {
-        NetworkPacket { id, tx_sec, tx_nsec, tx_time, packet_size }
+    pub fn new(id: u64, tx_timestamp: NetworkTimestamp, packet_size: u64) -> Self {
+        NetworkPacket { id, tx_timestamp, packet_size }
     }
 }
 
 #[derive(Default)]
 pub struct NetworkMetadata {
-    pub sec         : libc::time_t,
-    pub nsec        : libc::c_long,
-    pub rx_time     : Duration,
-    pub is_hardware : bool,
-    pub ovfl_count  : u64,
+    pub sw_timestamp    : NetworkTimestamp,
+    pub hw_timestamp    : Option<NetworkTimestamp>,
+    pub ovfl_count      : u32,
 }
+
+#[derive(Default)]
+pub struct NetworkTimestamp {
+    pub time: Duration,
+}
+
+impl NetworkTimestamp {
+    pub fn new(sec: u64, nsec: u32) -> Self {
+        Self { time: Duration::new(sec, nsec) }
+    }
+
+    pub fn from_timespec(ts: &libc::timespec) -> Self {
+        Self { time: Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32) }
+    }
+    pub fn sec(&self)  -> u64 { self.time.as_secs() }
+    pub fn nsec(&self) -> u32 { self.time.subsec_nanos() }
+}
+
 
 #[derive(Default)]
 pub struct NetworkData {
@@ -64,10 +78,10 @@ impl NetworkData {
     pub fn to_packet(_hdr: &[u8], _data: &[u8], _meta: &[u8]) -> io::Result<NetworkData> {
         
 
-        let (id, tx_sec, tx_nsec, tx_time) = NetworkData::process_header(_hdr)?;
+        let (id, tx_timestamp) = NetworkData::process_header(_hdr)?;
         let packet_size = (_data.len()) as u64 + (_hdr.len()) as u64;
         
-        let packet = NetworkPacket::new(id, tx_sec, tx_nsec, tx_time, packet_size);
+        let packet = NetworkPacket::new(id, tx_timestamp, packet_size);
 
         let metadata = NetworkData::process_metadata(_meta).ok_or_else(|| {
             io::Error::new(
@@ -79,7 +93,7 @@ impl NetworkData {
         Ok(NetworkData { packet , metadata })
     }
 
-    pub fn process_header(buf: &[u8]) -> io::Result<(u64, u64, u64, Duration)> {
+    pub fn process_header(buf: &[u8]) -> io::Result<(u64, NetworkTimestamp)> {
         // Ensure the buffer has at least 24 bytes to prevent panics
         if buf.len() < 24 {
             return Err(io::Error::new(
@@ -92,9 +106,10 @@ impl NetworkData {
         let id = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let tx_sec = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         let tx_nsec = u64::from_le_bytes(buf[16..24].try_into().unwrap());
-        let time = Duration::new(tx_sec as u64, tx_nsec as u32);
+        
+        let tx_timestamp = NetworkTimestamp::new(tx_sec, tx_nsec as u32);
 
-        Ok((id, tx_sec, tx_nsec, time))
+        Ok((id, tx_timestamp))
     }
 
     pub fn process_metadata(buf: &[u8]) -> Option<NetworkMetadata> {
@@ -102,8 +117,9 @@ impl NetworkData {
             return None;
         }
 
-        let mut ts:   Option<(i64, i64, bool)> = None;
-        let mut ovfl: Option<u64>              = None;
+        let mut sw_timestamp: Option<NetworkTimestamp> = None;
+        let mut hw_timestamp: Option<NetworkTimestamp> = None;
+        let mut ovfl: Option<u32>   = None;
 
         unsafe {
             let mut msg: libc::msghdr = std::mem::zeroed();
@@ -120,19 +136,21 @@ impl NetworkData {
                             let ts_ptr = libc::CMSG_DATA(cmsg) as *const libc::timespec;
                             let timestamps = std::slice::from_raw_parts(ts_ptr, 3);
                             let sw_ts = timestamps[0];
-                            let hw_ts = timestamps[2];
+                            
+                            if sw_ts.tv_sec != 0 || sw_ts.tv_nsec != 0 {
+                                sw_timestamp = Some(NetworkTimestamp::from_timespec(&sw_ts));
+                            }
 
-                            let (sec, nsec, is_hardware) = if hw_ts.tv_sec != 0 {
-                                (hw_ts.tv_sec, hw_ts.tv_nsec, true)
-                            } else {
-                                (sw_ts.tv_sec, sw_ts.tv_nsec, false)
-                            };
-                            ts = Some((sec, nsec, is_hardware)); 
+                            let hw_ts = timestamps[2];
+                            if hw_ts.tv_sec != 0 || hw_ts.tv_nsec != 0 {
+                                hw_timestamp = Some(NetworkTimestamp::from_timespec(&hw_ts));
+                            }
+
                         }
 
                         // Amount of packets lost due to socket RX Queue being full
                         libc::SO_RXQ_OVFL => {
-                            ovfl = Some(*(libc::CMSG_DATA(cmsg) as *const u64));
+                            ovfl = Some(*(libc::CMSG_DATA(cmsg) as *const u32));
                         }
                         
                         // Default 
@@ -143,11 +161,9 @@ impl NetworkData {
             }
         }
 
-        let (sec, nsec, is_hardware) = ts?;
-        let ovfl_count = ovfl.unwrap_or(0) as u64;
+        let ovfl_count = ovfl.unwrap_or(0);
 
-        let rx_time = Duration::new(sec as u64, nsec as u32);
-        Some(NetworkMetadata { sec, nsec, rx_time, is_hardware,  ovfl_count })
+        Some(NetworkMetadata { sw_timestamp: sw_timestamp?, hw_timestamp,  ovfl_count })
     }
 
         

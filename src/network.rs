@@ -5,7 +5,7 @@ use std::mem::MaybeUninit;
 use std::time::{Duration, Instant};
 use std::collections::HashSet;
 use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
-
+use std::thread;
 
 use crate::packet::Packet; 
 use crate::packet::NetworkData; 
@@ -69,9 +69,11 @@ impl NetworkClient {
 
     }
     
-    pub fn send_message(_target_addr: &str, payload_size: &usize, count: &Option<u64>,
-                         pps: &Option<u64>) -> io::Result<()> {
-                            
+
+
+    pub fn send_message(_target_addr: &str, payload_size: &usize, count: &i64, 
+                        interval: &Duration) -> io::Result<()> {
+
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
 
         let addr: SocketAddr = _target_addr.parse()
@@ -81,14 +83,30 @@ impl NetworkClient {
 
         let mut max_buffer = [0u8; 65507]; 
 
-        if *payload_size > max_buffer.len() {
+        if *payload_size > 65507 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size exceeds maximum buffer limit of 65507"));
         }
-        let padding = &mut max_buffer[..*payload_size];
+        let mut padding = &mut max_buffer[.. *payload_size];
 
-        for i in 0..1000 {
-            let mut packet = Packet::new(i, padding);
+        let mut i :i64 = 0;
+        let mut next_send_time = Instant::now() + *interval;
+
+        loop{
+
+            let now = Instant::now();
+            if now < next_send_time {
+                thread::sleep(next_send_time - now);
+            }
+
+    
+            let mut packet = Packet::new(i as u64, padding);
             socket.send(&packet.to_bytes())?;
+
+            i +=1;
+            next_send_time += *interval;
+
+            if i == *count {break};
+
         }
 
         Ok(())
@@ -129,7 +147,7 @@ impl NetworkClient {
             let mut msg = MsgHdrMut::new()
                 .with_buffers(&mut iov)
                 .with_control(&mut control_buf.0); // create memory structure to metadata
-            
+                            
             // Take one datagram at a time and push into our buffers
             let amt = socket_ref.recvmsg(&mut msg, 0)?;
 
@@ -175,8 +193,8 @@ pub struct NetworkLatency {
 
 impl NetworkLatency {
 
-   pub fn calc_latency(&mut self, later: &Duration, earlier: &Duration) -> Option<f64> {
-        let ms = later.checked_sub(*earlier)?.as_secs_f64() * 1000.0;
+   pub fn calc_latency(&mut self, new_time: &Duration, old_time: &Duration) -> Option<f64> {
+        let ms = new_time.checked_sub(*old_time)?.as_secs_f64() * 1000.0;
         self.latency.push(ms);
         Some(ms)
     }
@@ -208,8 +226,9 @@ pub struct NetworkInfo {
     pub recv_out_of_order   : u64,
     pub pcr                 : f64,
     pub network_loss        : u64,
-    pub kernal_loss         : u64,
+    pub kernal_loss         : u32,
     pub packet_count        : u64,
+    pub jitter              : f64,
 
     pub network_latency     : NetworkLatency,
     pub total_latency       : NetworkLatency,
@@ -238,6 +257,7 @@ impl NetworkInfo {
             network_loss        : 0,
             kernal_loss         : 0,
             packet_count        : 0,
+            jitter              : 0.0,
             
             network_latency     : NetworkLatency::default(),
             total_latency       : NetworkLatency::default(),
@@ -259,15 +279,16 @@ impl NetworkInfo {
 
         let net   = self.calc_network_latency(&_packet);
         let total = self.calc_total_latency(&_packet);
+        let jitte = self.calc_jitter(&_packet);
 
         println!(
-            "[{:>8}] {:>6} B  {}  net {:>9}  total {:>9}  proc {:>7?}  ovfl {:>6}  miss {:>6}  pcr {:>7.3}%",
+            "[{:>8}] {:>6} B  net {:>9}  total {:>9}  proc {:>7?}  jitter {:>6.3} ovfl {:>6}  miss {:>6}  pcr {:>7.3}%",
             _packet.packet.id,
             _packet.packet.packet_size,
-            if _packet.metadata.is_hardware { "HW" } else { "SW" },
             net.map_or("--".to_string(),   |v| format!("{:.3} ms", v)),
             total.map_or("--".to_string(), |v| format!("{:.3} ms", v)),
             self.calc_process_latency(),
+            jitte,
             self.kernal_loss,
             self.missing_ids.len(),
             self.pcr,
@@ -276,11 +297,32 @@ impl NetworkInfo {
     }
 
     pub fn calc_total_latency(&mut self, _packet: &NetworkData) -> Option<f64>{        
-        self.total_latency.calc_latency(&self.process_time, &_packet.packet.tx_time)
+        self.total_latency.calc_latency(&_packet.metadata.sw_timestamp.time, &_packet.packet.tx_timestamp.time)
     }
 
-    pub fn calc_network_latency(&mut self, _packet: &NetworkData) -> Option<f64>{        
-        self.network_latency.calc_latency(&_packet.metadata.rx_time, &_packet.packet.tx_time)
+    pub fn calc_network_latency(&mut self, _packet: &NetworkData) -> Option<f64>{      
+        if let Some(hw_time) = &_packet.metadata.hw_timestamp {  
+            self.total_latency.calc_latency(&hw_time.time, &_packet.packet.tx_timestamp.time)
+        } else {
+            None
+        }
+    }
+
+    pub fn calc_jitter(&mut self, _packet: &NetworkData) -> f64 {
+
+        let tx = _packet.packet.tx_timestamp.time;
+        let rx = _packet.metadata.sw_timestamp.time;
+        let delta = rx.checked_sub(tx).expect("REASON").as_secs_f64();
+
+        let last_tx = self.last_packet.packet.tx_timestamp.time;
+        let last_rx = self.last_packet.metadata.sw_timestamp.time;
+        let last_delta = last_rx.checked_sub(last_tx).expect("REASON").as_secs_f64();
+
+
+        let d = ((delta - last_delta).abs()) * 1000.0;     
+        self.jitter += (d - self.jitter) / 16.0;            // RFC 3550 smoothing
+        self.jitter
+
     }
 
     pub fn calc_process_latency(&self) -> Duration {
@@ -329,7 +371,6 @@ impl NetworkInfo {
 
         Ok(())
     }
-
 
 
     pub fn report(&mut self) {
