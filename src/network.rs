@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use std::collections::HashSet;
 use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
 use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 
 use crate::packet::Packet; 
 use crate::packet::NetworkData; 
@@ -15,6 +17,11 @@ pub struct NetworkClient {
     socket: UdpSocket,
 }
 
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+extern "C" fn handle_sigint(_: libc::c_int) {
+    RUNNING.store(false, Ordering::Relaxed);
+}
 
 unsafe fn set_opt<T>(fd: i32, level: i32, name: i32, val: &T) -> io::Result<()> {
     if libc::setsockopt(fd, level, name,
@@ -58,7 +65,11 @@ impl NetworkClient {
             // Enable RX KERNAL OVERFLOW COUNTER
             let on: libc::c_int = 1;
             set_opt(fd, libc::SOL_SOCKET, libc::SO_RXQ_OVFL, &on)?;
+            
+            libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);
         }
+
+        socket.set_read_timeout(Some(Duration::from_millis(500)))?;
 
         socket.set_recv_buffer_size(8 * 1024 * 1024)?;   // SO_RCVBUF socket queue size
 
@@ -92,7 +103,7 @@ impl NetworkClient {
         let mut next_send_time = Instant::now() + *interval;
 
         loop{
-
+            
             let now = Instant::now();
             if now < next_send_time {
                 thread::sleep(next_send_time - now);
@@ -138,7 +149,10 @@ impl NetworkClient {
         println!("Waiting for data...");
         
         loop {
-            
+            if !RUNNING.load(Ordering::Relaxed) { 
+                network_info.report();    
+                break; }
+
             let mut iov = [
                 MaybeUninitSlice::new(&mut header), // Header Datagram
                 MaybeUninitSlice::new(&mut buf),    // payload datagram
@@ -149,7 +163,13 @@ impl NetworkClient {
                 .with_control(&mut control_buf.0); // create memory structure to metadata
                             
             // Take one datagram at a time and push into our buffers
-            let amt = socket_ref.recvmsg(&mut msg, 0)?;
+            let amt = match socket_ref.recvmsg(&mut msg, 0) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+
 
             if amt < HEADER_SIZE {
                 eprintln!("runt packet: {amt} bytes");
@@ -206,12 +226,15 @@ impl NetworkLatency {
     }
 
     pub fn result(&mut self) {
+        if self.latency.is_empty() { return; }
         self.latency.sort_by(|a, b| a.total_cmp(b));
 
         let sum: f64 = self.latency.iter().sum();
 
         self.avg_latency = sum / self.latency.len() as f64;
-        self.max_latency = self.latency[self.latency.len()-1];
+
+
+        self.max_latency = self.latency[ self.latency.len().saturating_sub(1) ];
         self.min_latency = self.latency[0];
         self.p_50   = self.quantile(0.50);
         self.p_99   = self.quantile(0.99);
@@ -288,7 +311,7 @@ impl NetworkInfo {
         
 
         println!(
-             "[{:>8}] {:>6} B  TX->NIC {:>9}  TX->KernalRx {:>9}  KernalRx->Rcvmsg {:>9}  Rcvmsg->Processed {:>7?}  jitter {:>6.3} ovfl {:>6}  miss {:>6}  pcr {:>7.3}%",
+             "[{:>8}] {:>6} B  TX->NIC {:>9}  TX->KernalRx {:>9}  KernalRx->Rcvmsg {:>9}  Rcvmsg->Processed {:>7?}  jitter {:>6.3} ovfl {:>6}  miss {:>6}  out_of_order {:>5} pcr {:>7.3}%",
             _packet.packet.id,
             _packet.packet.packet_size,
             net.map_or("--".to_string(),   |v| format!("{:.3} ms", v)),
@@ -298,6 +321,7 @@ impl NetworkInfo {
             jitter,
             self.kernal_loss,
             self.missing_ids.len(),
+            self.recv_out_of_order,
             self.pcr,
         );
 
@@ -316,11 +340,11 @@ impl NetworkInfo {
 
     // TX to Hardware NIC / not going to work needs fixing
     pub fn calc_tx_to_nic(&mut self, _packet: &NetworkData) -> Option<f64>{      
-        if let Some(hw_time) = &_packet.metadata.hw_timestamp {  
-            self.tx_to_nic.calc_latency(&hw_time.time, &_packet.packet.tx_timestamp.time)
-        } else {
+    //     if let Some(hw_time) = &_packet.metadata.hw_timestamp {  
+    //         self.tx_to_nic.calc_latency(&hw_time.time, &_packet.packet.tx_timestamp.time)
+    //     } else {
             None
-        }
+    //     }
     }
 
 
@@ -396,6 +420,7 @@ impl NetworkInfo {
 
     pub fn report(&mut self) {
         self.tx_to_nic.result();
+        self.kernrx_to_pt.result();
         self.tx_to_kernal_rx_latency.result();
 
         let bar = "─".repeat(58);
@@ -405,16 +430,16 @@ impl NetworkInfo {
         println!(" kernel drops (ovfl)   {:>12}", self.kernal_loss);
         println!(" PCR                   {:>12.3} %", self.pcr);
         println!("{bar}");
-        println!(" latency (ms)  {:>14} {:>14}", "TX->KernalRx", "KernalRx->proc");
-        for (label, a, b) in [
-            ("min",   self.tx_to_nic.min_latency, self.tx_to_kernal_rx_latency.min_latency),
-            ("p50",   self.tx_to_nic.p_50,        self.tx_to_kernal_rx_latency.p_50),
-            ("p99",   self.tx_to_nic.p_99,        self.tx_to_kernal_rx_latency.p_99),
-            ("p99.9", self.tx_to_nic.p_99_9,      self.tx_to_kernal_rx_latency.p_99_9),
-            ("max",   self.tx_to_nic.max_latency, self.tx_to_kernal_rx_latency.max_latency),
-            ("avg",   self.tx_to_nic.avg_latency, self.tx_to_kernal_rx_latency.avg_latency),
+        println!(" latency (ms)  {:>14} {:>14} {:>14}", "TX->NIC", "TX->KernalRx", "KernalRx->Rcvmsg");
+        for (label, a, b, c) in [
+            ("min",   self.tx_to_nic.min_latency,    self.kernrx_to_pt.min_latency, self.tx_to_kernal_rx_latency.min_latency),
+            ("p50",   self.tx_to_nic.p_50,           self.kernrx_to_pt.p_50,        self.tx_to_kernal_rx_latency.p_50),
+            ("p99",   self.tx_to_nic.p_99,           self.kernrx_to_pt.p_99,        self.tx_to_kernal_rx_latency.p_99),
+            ("p99.9", self.tx_to_nic.p_99_9,         self.kernrx_to_pt.p_99_9,      self.tx_to_kernal_rx_latency.p_99_9),
+            ("max",   self.tx_to_nic.max_latency,    self.kernrx_to_pt.max_latency, self.tx_to_kernal_rx_latency.max_latency),
+            ("avg",   self.tx_to_nic.avg_latency,    self.kernrx_to_pt.avg_latency, self.tx_to_kernal_rx_latency.avg_latency),
         ] {
-            println!("   {:<10} {:>14.3} {:>14.3}", label, a, b);
+            println!("   {:<10} {:>14.3} {:>14.3} {:>14.3}", label, a, b, c);
         }
         println!("{bar}\n");
     }
