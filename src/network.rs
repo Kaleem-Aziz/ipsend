@@ -11,10 +11,10 @@ use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 
-use crate::packet::Packet;
+use crate::protocol::{Packet, Header};
 use crate::network_packet::NetworkData;
 use crate::stats::NetworkInfo;
-use crate::output::Sample;
+use crate::output::RxSample;
 
 pub struct NetworkClient {
     socket: UdpSocket,
@@ -108,7 +108,7 @@ impl NetworkClient {
             }
 
             let mut packet = Packet::new(i as u64, padding);
-            socket.send(&packet.to_bytes())?;
+            socket.send( &packet.to_bytes() )?;
 
             i +=1;
             next_send_time += *interval;
@@ -128,7 +128,7 @@ impl NetworkClient {
         let mut csv_writer = match &csv {
             Some(path) => {
                 let mut w = BufWriter::new(File::create(path)?);
-                writeln!(w, "{}", Sample::CSV_HEADER)?;
+                writeln!(w, "{}", RxSample::CSV_HEADER)?;
                 Some(w)
             }
             None => None,
@@ -136,11 +136,10 @@ impl NetworkClient {
 
 
         const MAX_PAYLOAD  :usize = 65507;
-        const HEADER_SIZE  :usize = 24;
-        const PAYLOAD_SZIE :usize = MAX_PAYLOAD - HEADER_SIZE;
+        const PAYLOAD_SZIE :usize = MAX_PAYLOAD - Header::HEADER_SIZE;
 
         // Creating Buffers for kernal to push data into 
-        let mut header      = [MaybeUninit::<u8>::uninit(); HEADER_SIZE];
+        let mut header      = [MaybeUninit::<u8>::uninit(); Header::HEADER_SIZE];
         let mut buf         = [MaybeUninit::<u8>::uninit(); PAYLOAD_SZIE];
         
 
@@ -181,13 +180,13 @@ impl NetworkClient {
             };
 
 
-            if amt < HEADER_SIZE {
+            if amt < Header::HEADER_SIZE {
                 eprintln!("runt packet: {amt} bytes");
                 continue;
             }
 
             
-            let payload_len = amt - HEADER_SIZE;
+            let payload_len = amt - Header::HEADER_SIZE;
             let control_len = msg.control_len();
 
             // Stamp arrival in userspace on the same clock the kernel used, so
@@ -196,16 +195,16 @@ impl NetworkClient {
 
 
             // Fat pointer to our  memory 
-            let hdr     = unsafe { std::slice::from_raw_parts(header.as_ptr() as *const u8, HEADER_SIZE) };
+            let hdr     = unsafe { std::slice::from_raw_parts(header.as_ptr() as *const u8, Header::HEADER_SIZE) };
             let payload = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, payload_len) };
             let control = unsafe { std::slice::from_raw_parts(control_buf.0.as_ptr() as *const u8, control_len) };
     
             let packet = NetworkData::to_packet(hdr, payload, control)?;
-            let sample = network_info.update_info(&packet, app_rx);
+            let rx_sample = network_info.update_info(&packet, app_rx);
 
-            if verbose { println!("{}", sample.line()); }
+            if verbose { println!("{}", rx_sample.line()); }
             if let Some(w) = &mut csv_writer {
-                writeln!(w, "{}", sample.csv_row())?;
+                writeln!(w, "{}", rx_sample.csv_row())?;
             }
 
         }

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use std::fmt::Write;
 
 use crate::network_packet::NetworkData; 
-use crate::network_packet::NetworkMetadata; 
-use crate::output::Sample; 
+use crate::network_packet::Metadata; 
+use crate::output::RxSample; 
 
 pub struct NetworkInfo {
     
@@ -40,24 +40,24 @@ impl NetworkInfo {
         }
     }
 
-    pub fn update_info(&mut self, p: &NetworkData, app_rx: Duration) -> Sample {
+    pub fn update_info(&mut self, p: &NetworkData, app_rx: Duration) -> RxSample {
 
         let process     = self.recv_instant.elapsed();
         
         let tx_to_kern  = self.tx_to_kernal_rx_latency
-                            .calculate_latency(&p.metadata.sw_timestamp.time, &p.packet.tx_timestamp.time);
+                            .calculate_latency(&p.metadata.sw_timestamp.time, &p.header.timestamp.time);
         let kern_to_app = self.kernrx_to_pt
                             .calculate_latency(&app_rx, &p.metadata.sw_timestamp.time);
         let jitter      = self.jitter
-                            .calculate(&p.packet.tx_timestamp.time, &p.metadata.sw_timestamp.time);
+                            .calculate(&p.header.timestamp.time, &p.metadata.sw_timestamp.time);
 
         let tx_to_nic = self.calculate_tx_to_nic(p);
 
         self.tracker.update_packet_tracking(p);
         
-        Sample {
-            id: p.packet.id,
-            size: p.packet.packet_size,
+        RxSample {
+            id: p.header.id,
+            size: p.packet_size,
             hw: p.metadata.hw_timestamp.is_some(),
             tx_to_nic, tx_to_kern, kern_to_app, jitter, process,
             ovfl:         self.tracker.kernal_loss,
@@ -201,27 +201,27 @@ pub struct NetworkTracker {
     pub kernal_loss         : u32,
     pub packet_count        : u64,
 
-    last_packet             : NetworkData,
+    last_packet             : u64,
 
 }
 
 impl NetworkTracker {
 
     fn update_packet_tracking(&mut self, p: &NetworkData) {
-        if self.last_packet.packet.id  > p.packet.id  {
-            if self.missing_ids.contains(&p.packet.id) {
-                self.missing_ids.remove(&p.packet.id);
+        if self.last_packet  > p.header.id  {
+            if self.missing_ids.contains(&p.header.id) {
+                self.missing_ids.remove(&p.header.id);
                 self.packet_count+=1;
                 self.recv_out_of_order+=1;
             }
         } 
         else {
-            if p.packet.id > self.next_id  {
-                for i in self.last_packet.packet.id+1 ..p.packet.id { self.missing_ids.insert(i); }
+            if p.header.id > self.next_id  {
+                for i in self.last_packet+1 .. p.header.id { self.missing_ids.insert(i); }
             }
 
-            self.last_packet  = *p; // Using Copy function
-            self.next_id = self.last_packet.packet.id + 1;
+            self.last_packet  = p.header.id; 
+            self.next_id = self.last_packet + 1;
             self.packet_count+=1;
         }
 
@@ -240,7 +240,7 @@ impl NetworkTracker {
         self.network_loss = self.missing_ids.len() as u64 - self.kernal_loss as u64;
     }
 
-    fn update_kernal_overlow(&mut self, _meta: &NetworkMetadata) {
+    fn update_kernal_overlow(&mut self, _meta: &Metadata) {
         self.kernal_loss = _meta.ovfl_count;
     }
 }

@@ -1,18 +1,17 @@
-use std::io;
-use clap::Parser;
-use std::time::Duration;
-
 
 mod args;
 mod network;
-mod packet;
 mod stats;
 mod network_packet;
 mod output;
-
+mod protocol;
 
 use crate::args::Cli; 
 use crate::args::Mode; 
+use std::io;
+use clap::Parser;
+use std::time::Duration;
+use crate::protocol::Header;
 
 fn main() -> io::Result<()> {
 
@@ -27,7 +26,7 @@ fn main() -> io::Result<()> {
 
         Mode::Send { addr, size, count, interval, pps, bps } => {
 
-            if size > 65507 || size < 24 {
+            if size > 65507 || size < Header::HEADER_SIZE {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload size must be between 24 & 65507 B"));
             }
 
