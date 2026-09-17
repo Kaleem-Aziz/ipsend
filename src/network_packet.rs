@@ -1,5 +1,10 @@
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration};
+
+
+
+
+
 
 #[derive(Default, Clone, Copy) ]
 pub struct NetworkPacket {
@@ -35,8 +40,8 @@ impl NetworkTimestamp {
     pub fn from_timespec(ts: &libc::timespec) -> Self {
         Self { time: Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32) }
     }
-    pub fn sec(&self)  -> u64 { self.time.as_secs() }
-    pub fn nsec(&self) -> u32 { self.time.subsec_nanos() }
+    // pub fn sec(&self)  -> u64 { self.time.as_secs() }
+    // pub fn nsec(&self) -> u32 { self.time.subsec_nanos() }
 }
 
 

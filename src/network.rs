@@ -1,18 +1,20 @@
 use std::io;
+use std::io::{BufWriter, Write};
+use std::fs::File;
+use std::path::PathBuf;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::mem::MaybeUninit;
 use std::time::{Duration, Instant};
-use std::collections::HashSet;
 use socket2::{Socket, Domain, Type, MsgHdrMut, MaybeUninitSlice};
 use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 
-use crate::packet::Packet; 
-use crate::network_packet::NetworkData; 
-use crate::network_packet::NetworkMetadata; 
+use crate::packet::Packet;
+use crate::network_packet::NetworkData;
 use crate::stats::NetworkInfo;
+use crate::output::Sample;
 
 pub struct NetworkClient {
     socket: UdpSocket,
@@ -35,7 +37,7 @@ unsafe fn set_opt<T>(fd: i32, level: i32, name: i32, val: &T) -> io::Result<()> 
 
 
 impl NetworkClient {
-    pub fn setup(_ip_addr: &str) -> io::Result<Self>{
+    pub fn setup_server(_ip_addr: &str) -> io::Result<Self>{
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
         socket.set_reuse_address(true)?;
@@ -67,7 +69,7 @@ impl NetworkClient {
             let on: libc::c_int = 1;
             set_opt(fd, libc::SOL_SOCKET, libc::SO_RXQ_OVFL, &on)?;
             
-            libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);
+            libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t);
         }
 
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -82,7 +84,6 @@ impl NetworkClient {
     }
     
 
-
     pub fn send_message(_target_addr: &str, payload_size: &usize, count: &i64, 
                         interval: &Duration) -> io::Result<()> {
 
@@ -95,19 +96,17 @@ impl NetworkClient {
 
         let mut max_buffer = [0u8; 65507]; 
 
-        let mut padding = &mut max_buffer[.. *payload_size];
+        let padding = &mut max_buffer[.. *payload_size];
 
         let mut i :i64 = 0;
         let mut next_send_time = Instant::now() + *interval;
 
-        loop{
-            
+        loop{     
             let now = Instant::now();
             if now < next_send_time {
                 thread::sleep(next_send_time - now);
             }
 
-    
             let mut packet = Packet::new(i as u64, padding);
             socket.send(&packet.to_bytes())?;
 
@@ -115,23 +114,30 @@ impl NetworkClient {
             next_send_time += *interval;
 
             if i == *count {break};
-
         }
 
         Ok(())
         
     }
 
-    pub fn start_listening (&self) -> io::Result<()> {
+    pub fn start_listening (&self, verbose: bool, csv: Option<PathBuf>) -> io::Result<()> {
 
         let mut network_info = NetworkInfo::new();
-
         let socket_ref = socket2::SockRef::from(&self.socket);
-        
+
+        let mut csv_writer = match &csv {
+            Some(path) => {
+                let mut w = BufWriter::new(File::create(path)?);
+                writeln!(w, "{}", Sample::CSV_HEADER)?;
+                Some(w)
+            }
+            None => None,
+        };
+
 
         const MAX_PAYLOAD  :usize = 65507;
         const HEADER_SIZE  :usize = 24;
-        const PAYLOAD_SZIE :usize = 65507-24;
+        const PAYLOAD_SZIE :usize = MAX_PAYLOAD - HEADER_SIZE;
 
         // Creating Buffers for kernal to push data into 
         let mut header      = [MaybeUninit::<u8>::uninit(); HEADER_SIZE];
@@ -147,8 +153,14 @@ impl NetworkClient {
         println!("Waiting for data...");
         
         loop {
-            if !RUNNING.load(Ordering::Relaxed) { 
-                network_info.report();    
+            if !RUNNING.load(Ordering::Relaxed) {
+                // Flush before reporting — a BufWriter dropped unflushed loses
+                // whatever is still buffered, and its Drop can't report the error.
+                if let Some(w) = &mut csv_writer {
+                    w.flush()?;
+                    println!("wrote samples to {}", csv.as_ref().unwrap().display());
+                }
+                println!("{}", network_info.report());
                 break; }
 
             let mut iov = [
@@ -178,8 +190,10 @@ impl NetworkClient {
             let payload_len = amt - HEADER_SIZE;
             let control_len = msg.control_len();
 
-            network_info.start_process_time();
-            
+            // Stamp arrival in userspace on the same clock the kernel used, so
+            // KernalRx->Rcvmsg is a like-for-like subtraction.
+            let app_rx = network_info.start_process_time();
+
 
             // Fat pointer to our  memory 
             let hdr     = unsafe { std::slice::from_raw_parts(header.as_ptr() as *const u8, HEADER_SIZE) };
@@ -187,7 +201,12 @@ impl NetworkClient {
             let control = unsafe { std::slice::from_raw_parts(control_buf.0.as_ptr() as *const u8, control_len) };
     
             let packet = NetworkData::to_packet(hdr, payload, control)?;
-            network_info.update_info(&packet)?;
+            let sample = network_info.update_info(&packet, app_rx);
+
+            if verbose { println!("{}", sample.line()); }
+            if let Some(w) = &mut csv_writer {
+                writeln!(w, "{}", sample.csv_row())?;
+            }
 
         }
 

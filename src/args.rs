@@ -16,17 +16,13 @@ pub enum Mode {
         #[arg(long, short)]
         addr: String,
 
-        /// Preallocate storage for this many samples
-        #[arg(long)]
-        capacity: Option<usize>,
-
         /// Write per-packet samples to a CSV file
         #[arg(long)]
         csv: Option<PathBuf>,
 
         /// Print a line for every packet
         #[arg(short, long)]
-        verbose: Option<bool>,
+        verbose: bool,
     },
 
     /// Send test packets

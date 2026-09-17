@@ -1,5 +1,4 @@
 use std::io;
-use std::env;
 use clap::Parser;
 use std::time::Duration;
 
@@ -9,6 +8,8 @@ mod network;
 mod packet;
 mod stats;
 mod network_packet;
+mod output;
+
 
 use crate::args::Cli; 
 use crate::args::Mode; 
@@ -18,10 +19,10 @@ fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Mode::Recv { addr, capacity, csv, verbose  } => {
-            let client = network::NetworkClient::setup(&addr)?;
-            client.start_listening()?;
-        
+        Mode::Recv { addr, csv, verbose  } => {
+            let client = network::NetworkClient::setup_server(&addr)?;
+            client.start_listening(verbose, csv)?;
+
         }
 
         Mode::Send { addr, size, count, interval, pps, bps } => {
