@@ -237,7 +237,7 @@ impl NetworkTracker {
     }
 
     fn calculate_network_loss(&mut self){
-        self.network_loss = self.missing_ids.len() as u64 - self.kernal_loss as u64;
+        self.network_loss = (self.missing_ids.len() as u64).saturating_sub(self.kernal_loss as u64);
     }
 
     fn update_kernal_overlow(&mut self, _meta: &Metadata) {

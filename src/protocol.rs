@@ -87,7 +87,7 @@ impl <'a> Packet<'a>  {
     }
 
     pub fn to_bytes(&mut self) -> &[u8] {
-        self.header.encode(self.payload); 
+        let _ = self.header.encode(self.payload); 
 
         self.payload
     }
