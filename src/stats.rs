@@ -199,6 +199,7 @@ pub struct NetworkTracker {
 
     pub network_loss        : u64,
     pub kernal_loss         : u32,
+    pub failed_decode       : u64,
     pub packet_count        : u64,
 
     last_packet             : u64,
@@ -243,5 +244,7 @@ impl NetworkTracker {
     fn update_kernal_overlow(&mut self, _meta: &Metadata) {
         self.kernal_loss = _meta.ovfl_count;
     }
+
+    pub fn  add_failed_to_decode(&mut self) { self.failed_decode +=1; }
 }
 

@@ -98,8 +98,9 @@ impl NetworkClient {
 
         let padding = &mut max_buffer[.. *payload_size];
 
-        let mut i :i64 = 0;
+        let mut i = 0;
         let mut next_send_time = Instant::now() + *interval;
+        let mut tx_error = 0;
 
         loop{     
             let now = Instant::now();
@@ -108,7 +109,10 @@ impl NetworkClient {
             }
 
             let mut packet = Packet::new(i as u64, padding);
-            socket.send( &packet.to_bytes() )?;
+
+            if let Err(_) = socket.send( &packet.to_bytes() ) {
+                tx_error += 1;
+            }
 
             i +=1;
             next_send_time += *interval;
@@ -116,6 +120,7 @@ impl NetworkClient {
             if i == *count {break};
         }
 
+        println!(" TX Complte {} Tx Error {} ", i-tx_error, tx_error);
         Ok(())
         
     }
@@ -151,6 +156,7 @@ impl NetworkClient {
 
         println!("Waiting for data...");
         
+
         loop {
             if !RUNNING.load(Ordering::Relaxed) {
                 // Flush before reporting — a BufWriter dropped unflushed loses
@@ -199,7 +205,13 @@ impl NetworkClient {
             let payload = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, payload_len) };
             let control = unsafe { std::slice::from_raw_parts(control_buf.0.as_ptr() as *const u8, control_len) };
     
-            let packet = NetworkData::to_packet(hdr, payload, control)?;
+    
+            let Ok(packet) = NetworkData::to_packet(hdr, payload, control) else {
+                network_info.tracker.add_failed_to_decode();
+                continue;
+            };
+
+
             let rx_sample = network_info.update_info(&packet, app_rx);
 
             if verbose { println!("{}", rx_sample.line()); }

@@ -17,16 +17,16 @@ impl NetworkData {
         
         let packet_size = (_data.len()) as u64 + (_hdr.len()) as u64;
         
-        let header = Header::decode(_hdr);
+        let header = Header::decode(_hdr)?;
 
         let metadata = Metadata::process(_meta).ok_or_else(|| {
-            io::Error::new(
+            return io::Error::new(
                 io::ErrorKind::NotFound,
                 "Required SO_TIMESTAMPING control message missing from buffer",
             )
         })?;
 
-        Ok(Self { header: header? , metadata, packet_size })
+        Ok(Self { header , metadata, packet_size })
     }
 
        
